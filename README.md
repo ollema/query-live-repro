@@ -1,9 +1,10 @@
 # query-live-repro
 
-Minimal SvelteKit + `query.live` reproduction showing that a streaming
-remote function silently breaks when the app is fronted by a reverse proxy
-with default response buffering (e.g. nginx as configured by CapRover) —
-and the one-line workaround that makes it work.
+Minimal SvelteKit + `query.live` reproduction showing that the
+`application/x-ndjson` response from a live remote function silently
+breaks behind any reverse proxy that buffers responses by default
+(nginx being the obvious one) — and the one-line `hooks.server.ts`
+workaround that fixes it.
 
 A live demo is up at: <https://query-live-repro.server.ollema.xyz>
 
@@ -11,58 +12,50 @@ A live demo is up at: <https://query-live-repro.server.ollema.xyz>
 
 `query.live` returns `application/x-ndjson`, an open response that yields
 newline-delimited JSON frames as the server-side async generator yields.
-Default nginx `proxy_pass` config **buffers the upstream response**, so
+**nginx's default `proxy_pass` config buffers upstream responses**, so
 the frames never reach the client; the connection just hangs. After
 nginx hits `proxy_read_timeout` (default 60s) it closes the upstream and
 flushes whatever (typically nothing) it had buffered, at which point
 Chrome reports `net::ERR_HTTP2_PROTOCOL_ERROR 200 (OK)` and SvelteKit
 flips `live.connected` to `false`.
 
-The fix is one line: respond with the `X-Accel-Buffering: no` header,
+The fix from the framework side is one header: `X-Accel-Buffering: no`,
 which nginx interprets as "do not buffer this response."
 
 ## What's in here
 
-- Two pages, each rendering the same `watchCounter` + `bump` remote
-  functions against the same in-memory counter:
-  - **`/broken`** — no proxy hint, hangs forever behind nginx.
-  - **`/fixed`** — `X-Accel-Buffering: no` set in `hooks.server.ts` for
-    this route, works as expected.
-- `src/lib/api/counter.remote.ts` — `watchCounter` (`query.live`) +
-  `bump` (`command`).
-- `src/lib/server/events.ts` — in-process `EventEmitter` bus.
-- `src/hooks.server.ts` — adds `X-Accel-Buffering: no` for `/fixed`.
-- `Dockerfile` and `.github/workflows/build.yml` — build to ghcr.io and
-  deploy via `caprover/deploy-from-github`.
+Two pages, sharing the same `watchCounter` + `bump` remote functions and
+the same in-memory counter:
 
-Open `/broken` and `/fixed` in two tabs side-by-side: `/fixed` ticks
-live; `/broken` doesn't, even when the bump comes from the other tab.
+- **`/broken`** — no proxy hint, hangs forever behind nginx.
+- **`/fixed`** — `X-Accel-Buffering: no` set in `hooks.server.ts` for
+  this route, works as expected.
+
+Open both in two tabs side-by-side: `/fixed` ticks live; `/broken`
+doesn't, even when the bump comes from the other tab.
 
 ## Local
 
 ```sh
 pnpm install
 pnpm dev
-# open http://localhost:5173 — both /broken and /fixed work fine, because
-# vite dev does not buffer responses
+# both /broken and /fixed work — vite dev does not buffer responses
 ```
 
-Both routes work locally. The bug only shows up once a reverse proxy
-that buffers by default (nginx, in this case) is in front of the Node
-server.
+The bug only shows up once nginx (or any other default-buffering
+reverse proxy) is in front of the Node server.
 
-## Observed behavior on a deployed CapRover instance
+## Observed behavior behind nginx
 
-Setup: CapRover on a Hetzner VPS, app exposed via CapRover's default
-nginx config, **DNS-only** through Cloudflare (so Cloudflare is not in
-the request path; the browser connects directly to the Hetzner box on
-HTTP/2). No special configuration applied at the proxy.
+Setup for the live demo: `@sveltejs/adapter-node` running in Docker,
+exposed via nginx's default `proxy_pass` config. No special
+configuration applied at the proxy.
 
 ### `/broken`
 
-1. The page renders, but `live.connected === false` from the start.
-2. The request to `/_app/remote/<hash>/watchCounter` sits **pending for
-   ~60s** (matches nginx's default `proxy_read_timeout`).
+1. Page renders, but `live.connected === false` from the start.
+2. Request to `/_app/remote/<hash>/watchCounter` sits **pending for ~60s**
+   (matches nginx's default `proxy_read_timeout`).
 3. Then it "completes" with the response below — and Chrome immediately
    logs `net::ERR_HTTP2_PROTOCOL_ERROR 200 (OK)`.
 
@@ -73,22 +66,22 @@ content-type:   application/x-ndjson
 server:         nginx
 ```
 
-Pressing "bump" or "retry" reproduces the same hang for the next request.
+Pressing "bump" or "retry" reproduces the hang for the next request.
 
 ### `/fixed`
 
 1. `live.connected === true` immediately.
 2. `bump` ticks the counter live.
-3. With two `/fixed` tabs open, both stay in sync.
-4. With one `/fixed` and one `/broken` open, the `/fixed` tab still ticks
-   on every bump — it's the per-response header that matters.
+3. Two `/fixed` tabs stay in sync.
+4. With one `/fixed` and one `/broken` open, `/fixed` still ticks on
+   every bump — the workaround is per-response, scoped to that page.
 
-The response carries the same `Cache-Control: private, no-store` and
-`Content-Type: application/x-ndjson` as `/broken`, plus the hook adds
-`X-Accel-Buffering: no`. nginx honors the header (and strips it from
-the response sent to the client, so you won't see it in devtools — its
-absence on `/fixed` responses is the expected sign that nginx acted on
-it).
+The `/fixed` response carries the same `Cache-Control: private, no-store`
+and `Content-Type: application/x-ndjson` as `/broken`, plus the hook
+adds `X-Accel-Buffering: no`. nginx honors the header (and strips it
+from the response sent to the client, so you won't see it in devtools —
+its absence on `/fixed` responses is the expected sign that nginx acted
+on it).
 
 ## Why nginx eats the stream
 
@@ -104,49 +97,39 @@ Its only opt-outs from the upstream side are:
 The hook in this repo uses the latter — it requires no changes on the
 proxy host.
 
-## Two findings worth surfacing
+## What might be worth fixing in SvelteKit
 
-### 1. `query.live` ndjson responses break behind any default-buffering proxy
+nginx-fronted Node deploys are very common — every CapRover, Coolify,
+Dokku, and hand-rolled nginx-in-front-of-Node setup ships with response
+buffering on by default. Today, `query.live` is silently broken on all
+of them out of the box.
 
-This is the headline bug. nginx is the most common default-buffering
-proxy in production deploys; CapRover, Coolify, Dokku, hand-rolled
-nginx-fronted Node, and many others ship a config that buffers
-`proxy_pass` responses by default. SvelteKit currently emits no header
-that nginx honors, so every such deploy is silently broken for
-`query.live`.
+A one-line change in the framework — emit `X-Accel-Buffering: no` on
+the streaming remote-function response by default — would unbreak every
+such deploy with no user action required. The header is harmless on
+proxies that don't recognize it, and it's the standard signal for
+"this is a streaming response, don't buffer me."
 
-A one-line framework fix — emit `X-Accel-Buffering: no` on streaming
-remote-function responses by default — would unbreak all of these
-without any user action. (Until that lands, the `hooks.server.ts`
-workaround in this repo works.)
-
-### 2. `event.url.pathname` in `handle` is the originating page path for remote requests, not `/_app/remote/...`
-
-For a request like `GET /_app/remote/<hash>/watchCounter`, the
-`event.url.pathname` seen by `handle` is `/fixed` (the page that called
-the remote function), not `/_app/remote/<hash>/watchCounter`. SvelteKit
-reads this from the `x-sveltekit-pathname` request header.
-
-This is presumably intentional — it lets hooks reason in page context —
-but the obvious userland filter `pathname.startsWith('/_app/remote/')`
-will silently never match, and a worked example in the docs would have
-saved an hour here. (Compare `event.url.pathname` on a homepage `GET /`
-vs. on its remote function call: identical — completely opaque from
-the hook's perspective.)
+Until that lands, the `hooks.server.ts` workaround in `/fixed` works.
 
 ## Reproducing the deploy
 
+The included `Dockerfile` and `.github/workflows/build.yml` deploy via
+[CapRover](https://caprover.com/) (which fronts apps with nginx using
+its default config — convenient for reproducing this bug), but any
+nginx-in-front-of-Node setup will reproduce identically.
+
+For the included CapRover flow:
+
 1. Fork / push this repo to your own GitHub account.
 2. Create a new app in CapRover. Note the app name + generate an app token.
-3. In the GitHub repo, add secrets:
+3. Add GitHub repo secrets:
    - `CAPROVER_SERVER` (e.g. `https://captain.your-domain.tld`)
    - `CAPROVER_APP_NAME`
    - `CAPROVER_APP_TOKEN`
-4. Point a hostname at the CapRover app. Cloudflare proxy is **not**
-   required; DNS-only is sufficient to reproduce.
-5. Push to `main`. The workflow builds the image, pushes to ghcr.io, and
+4. Push to `main`. The workflow builds the image, pushes to ghcr.io, and
    tells CapRover to pull `sha-<commit>`.
-6. Open `/broken` and `/fixed` and compare.
+5. Open `/broken` and `/fixed` and compare.
 
 ## Versions
 
@@ -154,4 +137,4 @@ the hook's perspective.)
 - `@sveltejs/adapter-node ^5.5.4`
 - `svelte ^5.55.5`
 - node `22`
-- nginx via CapRover (default config)
+- nginx (default config)

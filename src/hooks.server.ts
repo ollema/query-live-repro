@@ -3,16 +3,12 @@ import type { Handle } from '@sveltejs/kit';
 export const handle: Handle = async ({ event, resolve }) => {
 	const response = await resolve(event);
 
-	// Tell upstream proxies (notably nginx) not to buffer streaming responses
-	// from remote functions. Without this, query.live ndjson never reaches the
-	// client because nginx holds the entire response until proxy_read_timeout.
+	// Tell upstream proxies (notably nginx) not to buffer the streaming
+	// ndjson response from query.live. Without this, nginx holds the entire
+	// response until proxy_read_timeout and the client never sees a frame.
 	//
-	// Note: for a remote function request like
-	// `GET /_app/remote/<hash>/watchCounter`, `event.url.pathname` here is set
-	// to the *originating page* path (`/fixed`), NOT the remote endpoint path.
-	// SvelteKit reads this from the `x-sveltekit-pathname` request header. So
-	// the obvious `pathname.startsWith('/_app/remote/')` filter never matches.
-	// We use this to scope the workaround to the `/fixed` route only.
+	// Scoped here to the /fixed page only so /broken stays broken for
+	// comparison — see README.
 	if (event.url.pathname === '/fixed') {
 		response.headers.set('X-Accel-Buffering', 'no');
 	}
