@@ -97,44 +97,10 @@ Its only opt-outs from the upstream side are:
 The hook in this repo uses the latter — it requires no changes on the
 proxy host.
 
-## What might be worth fixing in SvelteKit
-
-nginx-fronted Node deploys are very common — every CapRover, Coolify,
-Dokku, and hand-rolled nginx-in-front-of-Node setup ships with response
-buffering on by default. Today, `query.live` is silently broken on all
-of them out of the box.
-
-A one-line change in the framework — emit `X-Accel-Buffering: no` on
-the streaming remote-function response by default — would unbreak every
-such deploy with no user action required. The header is harmless on
-proxies that don't recognize it, and it's the standard signal for
-"this is a streaming response, don't buffer me."
-
-Until that lands, the `hooks.server.ts` workaround in `/fixed` works.
-
-## Reproducing the deploy
-
-The included `Dockerfile` and `.github/workflows/build.yml` deploy via
-[CapRover](https://caprover.com/) (which fronts apps with nginx using
-its default config — convenient for reproducing this bug), but any
-nginx-in-front-of-Node setup will reproduce identically.
-
-For the included CapRover flow:
-
-1. Fork / push this repo to your own GitHub account.
-2. Create a new app in CapRover. Note the app name + generate an app token.
-3. Add GitHub repo secrets:
-   - `CAPROVER_SERVER` (e.g. `https://captain.your-domain.tld`)
-   - `CAPROVER_APP_NAME`
-   - `CAPROVER_APP_TOKEN`
-4. Push to `main`. The workflow builds the image, pushes to ghcr.io, and
-   tells CapRover to pull `sha-<commit>`.
-5. Open `/broken` and `/fixed` and compare.
-
 ## Versions
 
 - `@sveltejs/kit ^2.59.0`
 - `@sveltejs/adapter-node ^5.5.4`
 - `svelte ^5.55.5`
 - node `22`
-- nginx (default config)
+- nginx
