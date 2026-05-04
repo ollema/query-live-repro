@@ -1,23 +1,23 @@
-<script lang="ts">
-	import { watchCounter, bump } from '$lib/api/counter.remote';
-
-	let live = $derived(watchCounter({}));
-	let data = $derived(await live);
-</script>
-
 <h1>query.live repro</h1>
 
-<p>counter: <strong>{data.value}</strong></p>
-<p>last yield: <code>{data.at}</code></p>
-
 <p>
-	<button onclick={() => bump({})}>bump</button>
+	Two routes, sharing the same in-memory counter and the same
+	<code>watchCounter</code> + <code>bump</code> remote functions:
 </p>
 
-{#if live.connected}
-	<p style="color: green">connected</p>
-{:else}
-	<p style="color: red">
-		disconnected — <button onclick={() => live.reconnect()}>retry</button>
-	</p>
-{/if}
+<ul>
+	<li>
+		<a href="/broken">/broken</a> — no proxy hint set; nginx buffers the
+		stream and the page sits in <code>disconnected</code>.
+	</li>
+	<li>
+		<a href="/fixed">/fixed</a> — <code>X-Accel-Buffering: no</code> is set
+		on the response by <code>hooks.server.ts</code> for this route, so nginx
+		streams the response through and live updates arrive.
+	</li>
+</ul>
+
+<p>
+	Open both routes in two tabs side-by-side. <code>/fixed</code> ticks live;
+	<code>/broken</code> doesn't, even when the bump comes from the other tab.
+</p>
